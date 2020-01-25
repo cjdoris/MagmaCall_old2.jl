@@ -13,3 +13,5 @@
 - Wrap Magma intrinsics into their Julia couterparts in `base.jl`.
 
 - Conversion from Magma to Julia.
+
+- Move `server.mag` to a new folder `magma/` and split out the stuff replicating Julia base functionality into `base.jl`.
