@@ -55,3 +55,5 @@ Since Magma does not have a programmatic API, we communicate with it through `st
 This server has some state, which mainly consists of a lookup table mapping unique integer ids to Magma values. These ids are what are also stored Julia-side in a `MagmaObject`. By sending commands to the server, we can create new values, look up attributes, call intrinsics, print stuff out, and so forth. When a `MagmaObject` is garbage-collected, the corresponding value in Magma is deleted.
 
 Because communication is done via IO streams, each individual operation has quite a bit of overhead (e.g. around 0.4ms on my machine). Hence this package will be extremely slow if you try to do anything with tight loops, but is fine for interactive use or for using Julia for high-level control.
+
+Since Magma does not have a native iteration interface, we have to a bit of a hack: if we want to iterate over `x`, then we convert `x` into something that can be indexed into (using `__jl_as_indexable`), then iterate over indices. So iterating over sequences, lists, indexed sets and tuples requires no conversion, but everything else will be converted to a list.
