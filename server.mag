@@ -1,0 +1,653 @@
+freeze;
+
+declare type __jl_State;
+declare attributes __jl_State: curvar, vars, token, lasterror, callers;
+state := New(__jl_State);
+state`curvar := 1;
+state`vars := AssociativeArray(Integers());
+state`callers := AssociativeArray();
+
+intrinsic __jl_listattrs(x)
+	{List the attributes available on x. For most `x` this is `ListAttributes(Type(x))` but for records it is the field names.}
+	ListAttributes(Type(x));
+end intrinsic;
+
+intrinsic __jl_listattrs(x::Rec)
+	{"}
+	for name in Names(Format(x)) do
+		print name;
+	end for;
+end intrinsic;
+
+function readval()
+	read t;
+	case t:
+	when "int":
+		readi val;
+		return val;
+	when "real":
+		// TODO: is there a better way?
+		read val;
+		return eval val;
+	when "var":
+		readi i;
+		return state`vars[i];
+	when "true":
+		return true;
+	when "false":
+		return false;
+	when "intr":
+		read nm;
+		ok, r := IsIntrinsic(nm);
+		if ok then
+			return r;
+		else
+			error "not an intrinsic:", nm;
+		end if;
+	when "type":
+		read nm;
+		return MakeType(nm);
+	when "sym":
+		read nm;
+		try
+			ok, r := IsIntrinsic(nm);
+			if ok then return r; end if;
+			return MakeType(nm);
+		catch e
+			error "not an intrinsic or type:", nm;
+		end try;
+	when "[]":
+		return [];
+	when "[|]":
+		u := readval();
+		return [u|];
+	when "{}":
+		return {};
+	when "{|}":
+		u := readval();
+		return {u|};
+	when "[**]":
+		return [**];
+	when "[..]":
+		a := readval();
+		b := readval();
+		return [a..b];
+	when "[..by]":
+		a := readval();
+		b := readval();
+		c := readval();
+		return [a..b by c];
+	when "{..}":
+		a := readval();
+		b := readval();
+		return {a..b};
+	when "{..by}":
+		a := readval();
+		b := readval();
+		c := readval();
+		return {a..b by c};
+	when "str":
+		readi n;
+		chunks := [Strings()|];
+		m := 0;
+		while m lt n do
+			read chunk;
+			m +:= #chunk;
+			if #chunks gt 0 then
+				m +:= 1;
+			end if;
+			Append(~chunks, chunk);
+		end while;
+		assert m eq n;
+		r := &cat chunks;
+		assert #r eq n;
+		return r;
+	else
+		error "invalid type:", t;
+	end case;
+end function;
+
+function nextvar()
+	s := state;
+	i := s`curvar;
+	s`curvar := i + 1;
+	return i;
+end function;
+
+procedure success()
+	print state`token;
+	print true;
+end procedure;
+
+procedure fail(e)
+	s := state;
+	s`lasterror := e;
+	print state`token;
+	print false;
+end procedure;
+
+function call(mode)
+	read arginfo;
+	readi nret;
+	key := <arginfo, nret, mode>;
+	s := state;
+	ok, cf := IsDefined(s`callers, key);
+	if not ok then
+		// parse arginfo
+		ps := Split(arginfo, ":");
+		if #ps eq 0 then
+			args := "";
+			opts := [];
+		else
+			args := ps[1];
+			opts := ps[2..#ps];
+		end if;
+		// construct a function
+		xs := [Strings()|];
+		Append(~xs, "function (st)");
+		Append(~xs, "f:=readval();");
+		for i := 1 to #args do
+			case args[i]:
+			when ".":
+				Append(~xs, Sprintf("x%o:=readval();",i));
+			when "~":
+				error if nret ne 0, "reference arguments only allowed in procedure calls";
+				Append(~xs, Sprintf("readi x%o;",i));
+			else
+				error "bad args:", args;
+			end case;
+		end for;
+		for i := 1 to #opts do
+			Append(~xs, Sprintf("y%o:=readval();",i));
+		end for;
+		// the actual function call
+		cs := [Strings()|];
+		if nret gt 0 then
+			for i := 1 to nret do
+				if i gt 1 then
+					Append(~cs, ",");
+				end if;
+				Append(~cs, Sprintf("r%o",i));
+			end for;
+			Append(~cs, ":=");
+		end if;
+		Append(~cs, "f(");
+		for i := 1 to #args do
+			if i gt 1 then
+				Append(~cs, ",");
+			end if;
+			case args[i]:
+			when ".":
+				Append(~cs, Sprintf("x%o", i));
+			when "~":
+				Append(~cs, Sprintf("~st`vars[x%o]", i));
+			else
+				error "bad args:", args;
+			end case;
+		end for;
+		for i := 1 to #opts do
+			if i gt 1 then
+				Append(~cs, ",");
+			else
+				Append(~cs, ":");
+			end if;
+			Append(~cs, Sprintf("%o:=y%o", opts[i], i));
+		end for;
+		Append(~cs, ");");
+		Append(~xs, &cat cs);
+		// output
+		case mode:
+		when "vars":
+			for i := 1 to nret do
+				Append(~xs, Sprintf("if assigned r%o then; i%o:=nextvar(); st`vars[i%o]:=r%o; else; i%o:=0; end if;",i,i,i,i,i));
+			end for;
+			Append(~xs, Sprintf("return [%o];", Join([Sprintf("i%o",i) : i in [1..nret]], ",")));
+		when "bool":
+			assert nret eq 1;
+			Append(~xs, "assert Type(r1) eq BoolElt;");
+			Append(~xs, "return r1;");
+		when "int":
+			assert nret eq 1;
+			Append(~xs, "assert Type(r1) eq RngIntElt;");
+			Append(~xs, "return r1;");
+		else
+			error "bad mode:", mode;
+		end case;
+		Append(~xs, "end function");
+		cfx := Join(xs, "\n");
+		// print cfx;
+		cf := eval cfx;
+		s`callers[key] := cf;
+	end if;
+	return cf(s);
+end function;
+
+procedure server(state)
+	while true do
+		read cmd;
+		case cmd:
+		when "__jl_server_running();":
+			print true;
+		when "ping":
+			print state`token;
+		when "stop":
+			return;
+		when "geterror":
+			try
+				if assigned state`lasterror then
+					i := nextvar();
+					state`vars[i] := state`lasterror;
+					delete state`lasterror;
+				else
+					i := 0;
+				end if;
+				success();
+				print i;
+			catch e
+				fail(e);
+			end try;
+		when "assigned":
+			try
+				readi i;
+				r := IsDefined(state`vars, i);
+				success();
+				print r;				
+			catch e
+				fail(e);
+			end try;
+		when ":=":
+			try
+				readi i;
+				state`vars[i] := readval();
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "new:=":
+			try
+				i := nextvar();
+				state`vars[i] := readval();
+				success();
+				print i;
+			catch e
+				fail(e);
+			end try;
+		when "delete":
+			try
+				readi i;
+				Remove(~state`vars, i);
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "print":
+			try
+				readi i;
+				printf "%o\n", state`vars[i];
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "printm":
+			try
+				readi i;
+				printf "%m\n", state`vars[i];
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "numvars":
+			print #state`vars;
+		when "getattr":
+			try
+				readi i;
+				read k;
+				j := nextvar();
+				state`vars[j] := state`vars[i]``k;
+				success();
+				print j;
+			catch e
+				fail(e);
+			end try;
+		when "setattr":
+			try
+				readi i;
+				read k;
+				state`vars[j]``k := readval();
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "delattr":
+			try
+				readi i;
+				read k;
+				delete state`vars[i]``k;
+			catch e
+				fail(e);
+			end try;
+		when "attrisassigned":
+			try
+				readi i;
+				read k;
+				r := HasAttribute(state`vars[i], k);
+				success();
+				print r;
+			catch e
+				fail(e);
+			end try;
+		when "listattrs":
+			try
+				readi i;
+				__jl_listattrs(state`vars[i]);
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "echo":
+			read x;
+			print x;
+		when "printerrobject":
+			try
+				readi i;
+				print state`vars[i]`Object;
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "call":
+			try
+				rs := call("vars");
+				success();
+				for r in rs do
+					print r;
+				end for;
+			catch e
+				fail(e);
+			end try;
+		when "callb":
+			try
+				r := call("bool");
+				success();
+				print r;
+			catch e
+				fail(e);
+			end try;
+		when "calli":
+			try
+				r := call("int");
+				success();
+				print r;
+			catch e
+				fail(e);
+			end try;
+		when "[]":
+			try
+				readi i;
+				a := readval();
+				j := nextvar();
+				state`vars[j] := state`vars[i][a];
+				success();
+				print j;
+			catch e
+				fail(e);
+			end try;
+		when "[,]":
+			try
+				readi i;
+				a := readval();
+				b := readval();
+				j := nextvar();
+				state`vars[j] := state`vars[i][a,b];
+				success();
+				print j;
+			catch e
+				fail(e);
+			end try;
+		when "[]:=":
+			try
+				readi i;
+				x := readval();
+				a := readval();
+				state`vars[i][a] := x;
+				success();
+			catch e
+				fail(e);
+			end try;
+		when "[,]:=":
+			try
+				readi i;
+				x := readval();
+				a := readval();
+				b := readval();
+				state`vars[i][a,b] := x;
+				success();
+			catch e
+				fail(e);
+			end try;
+		else
+			fail(Error("invalid command: " cat cmd));
+		end case;
+	end while;
+end procedure;
+
+intrinsic __jl_server_start()
+	{Start the server.}
+	server(state);
+end intrinsic;
+
+intrinsic __jl_server_settoken(tok)
+	{Set the token for the server.}
+	s := state;
+	s`token := tok;
+end intrinsic;
+
+intrinsic __jl_server_running()
+	{True if the server is running.}
+	print false;
+end intrinsic;
+
+intrinsic __jl_server_state() -> .
+	{The state of the server.}
+	return state;
+end intrinsic;
+
+intrinsic __jl_as_sequence(xs) -> SeqEnum
+	{}
+	return [x : x in xs];
+end intrinsic;
+
+intrinsic __jl_as_sequence(xs::SeqEnum) -> SeqEnum
+	{}
+	return xs;
+end intrinsic;
+
+intrinsic __jl_as_sequence(xs::SetEnum) -> SeqEnum
+	{}
+	return SetToSequence(xs);
+end intrinsic;
+
+intrinsic __jl_as_sequence(xs::SetMulti) -> SeqEnum
+	{}
+	return MultisetToSequence(xs);
+end intrinsic;
+
+intrinsic __jl_as_sequence(xs::SetIndx) -> SeqEnum
+	{}
+	return IndexedSetToSequence(xs);
+end intrinsic;
+
+intrinsic __jl_as_set(xs) -> SetEnum
+	{}
+	return {x : x in xs};
+end intrinsic;
+
+intrinsic __jl_as_set(xs::SetEnum) -> SetEnum
+	{}
+	return xs;
+end intrinsic;
+
+intrinsic __jl_as_set(xs::SeqEnum) -> SetEnum
+	{}
+	return SequenceToSet(xs);
+end intrinsic;
+
+intrinsic __jl_as_set(xs::SetMulti) -> SetEnum
+	{}
+	return MultisetToSet(xs);
+end intrinsic;
+
+intrinsic __jl_as_set(xs::SetIndx) -> SetEnum
+	{}
+	return IndexedSetToSet(xs);
+end intrinsic;
+
+intrinsic __jl_as_list(xs) -> List
+	{}
+	return [* x : x in xs *];
+end intrinsic;
+
+intrinsic __jl_as_list(xs::List) -> List
+	{}
+	return xs;
+end intrinsic;
+
+intrinsic __jl_as_indexable(xs) -> .
+	{}
+	return __jl_as_list(xs);
+end intrinsic;
+
+intrinsic __jl_as_indexable(xs::SeqEnum) -> .
+	{}
+	return xs;
+end intrinsic;
+
+intrinsic __jl_as_indexable(xs::SetIndx) -> .
+	{}
+	return xs;
+end intrinsic;
+
+intrinsic __jl_as_indexable(xs::List) -> .
+	{}
+	return xs;
+end intrinsic;
+
+intrinsic __jl_delindex(~x, i)
+	{}
+	Remove(~x, i);
+end intrinsic;
+
+intrinsic __jl_push(~xs::Any, v)
+	{}
+	Append(~xs, v);
+end intrinsic;
+
+intrinsic __jl_push(~xs::SetEnum, v)
+	{}
+	Include(~xs, v);
+end intrinsic;
+
+intrinsic __jl_push(~xs::SetMulti, v)
+	{}
+	Include(~xs, v);
+end intrinsic;
+
+intrinsic __jl_push(~xs::SetIndx, v)
+	{}
+	Include(~xs, v);
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SeqEnum)
+	{}
+	n := #xs;
+	r := xs[n];
+	Remove(~xs, n);
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::List)
+	{}
+	n := #xs;
+	r := xs[n];
+	Remove(~xs, n);
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetEnum)
+	{}
+	r := Rep(xs);
+	Exclude(~xs, r);
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetIndx)
+	{}
+	r := Rep(xs);
+	Exclude(~xs, r);
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetMulti)
+	{}
+	r := Rep(xs);
+	Exclude(~xs, r);
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetEnum, x)
+	{}
+	Exclude(~xs, x);
+	r := x;
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetIndx, x)
+	{}
+	Exclude(~xs, x);
+	r := x;
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetMulti, x)
+	{}
+	Exclude(~xs, x);
+	r := x;
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetEnum, x, y)
+	{}
+	if x in xs then
+		Exclude(~xs, x);
+		r := x;
+	else
+		r := y;
+	end if;
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetIndx, x, y)
+	{}
+	if x in xs then
+		Exclude(~xs, x);
+		r := x;
+	else
+		r := y;
+	end if;
+end intrinsic;
+
+intrinsic __jl_pop(~r, ~xs::SetMulti, x, y)
+	{}
+	if x in xs then
+		Exclude(~xs, x);
+		r := x;
+	else
+		r := y;
+	end if;
+end intrinsic;
+
+intrinsic __jl_display(x)
+	{}
+	print x;
+end intrinsic;
+
+intrinsic __jl_display(x::MonStgElt)
+	{}
+	print x:Magma;
+end intrinsic;
+
+intrinsic __jl_display(x::Intrinsic)
+	{}
+	print x:Magma;
+end intrinsic;
